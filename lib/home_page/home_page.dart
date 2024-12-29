@@ -1,27 +1,30 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 import 'dart:io';
-import 'package:path/path.dart' show join;
+import 'package:path/path.dart' as path;
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../note_editor/note_editor_page.dart';
 import 'package:test_note/search_page/search_page.dart';
 import 'package:test_note/tags_page/tags_page.dart';
 
-class HomePage extends StatefulWidget {
-  const HomePage();
+class NotesHomePage extends StatefulWidget {
+  const NotesHomePage({Key? key}) : super(key: key);
 
   @override
-  State<HomePage> createState() => _HomePageState();
+  State<NotesHomePage> createState() => _NotesHomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _NotesHomePageState extends State<NotesHomePage> {
   late Future<Database> _myDatabase;
   bool _isGridView = true;
   bool _isSelecting = false;
   List<bool> _selectedNotes = [];
   List<Map<String, dynamic>> _notes = [];
+  bool _isLoading = true;
   int _selectedIndex = 0;
   late Future<List<Map<String, dynamic>>> _notesFuture;
 
@@ -29,132 +32,408 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _myDatabase = _initDatabase();
-    _notesFuture = _fetchNotes();
+    _notesFuture = _loadNotes();
     syncWithFirebase(_myDatabase).then((_) => setState(() {}));
   }
 
+  Future<List<Map<String, dynamic>>> _loadNotes() async {
+    setState(() => _isLoading = true);
+    try {
+      final db = await _myDatabase;
+      final List<Map<String, dynamic>> notes = await db.query(
+        'notes',
+        orderBy: 'updated_at DESC',
+      );
+
+      setState(() {
+        _notes = notes;
+        _selectedNotes = List.filled(notes.length, false);
+        _isLoading = false;
+      });
+      return notes; // Trả về notes thay vì void
+    } catch (e) {
+      print('Error loading notes: $e');
+      setState(() => _isLoading = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error loading notes: $e')),
+        );
+      }
+      return []; // Trả về list rỗng trong trường hợp có lỗi
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-        appBar: AppBar(
-          backgroundColor: Colors.blueGrey[200],
-          title: const Text('Home Notes'),
-          actions: [
-            if (_isSelecting)
-              Row(
+      appBar: AppBar(
+        backgroundColor: Colors.blueGrey[200],
+        title: const Text('My Notes'),
+        actions: [
+          if (_isSelecting)
+            Row(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8.0),
+                  child: Text(
+                    '${_selectedNotes
+                        .where((selected) => selected)
+                        .length} selected',
+                    style: const TextStyle(fontSize: 16),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete),
+                  onPressed: () async {
+                    await _deleteSelectedNotes();
+                    await _loadNotes();
+                  },
+                ),
+                IconButton(
+                  icon: const Icon(Icons.check),
+                  onPressed: () {
+                    setState(() {
+                      _isSelecting = false;
+                      _selectedNotes = List.filled(_notes.length, false);
+                    });
+                  },
+                ),
+              ],
+            ),
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
+            itemBuilder: (context) =>
+            [
+              PopupMenuItem(
+                value: 'view_toggle',
+                child: ListTile(
+                  leading: Icon(_isGridView ? Icons.list : Icons.grid_view),
+                  title: Text(_isGridView ? 'View as List' : 'View as Grid'),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'select_notes',
+                child: ListTile(
+                  leading: const Icon(Icons.check_circle_outline),
+                  title: Text(
+                      _isSelecting ? 'Cancel Selection' : 'Select Notes'),
+                ),
+              ),
+              const PopupMenuItem(
+                value: 'sync_now',
+                child: ListTile(
+                  leading: Icon(Icons.sync),
+                  title: Text('Sync Now'),
+                ),
+              ),
+            ],
+            onSelected: (value) async {
+              switch (value) {
+                case 'view_toggle':
+                  setState(() => _isGridView = !_isGridView);
+                  break;
+                case 'select_notes':
+                  setState(() => _isSelecting = !_isSelecting);
+                  break;
+                case 'sync_now':
+                  await manualSync();
+                  break;
+              }
+            },
+          ),
+        ],
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _notes.isEmpty
+          ? _buildEmptyState()
+          : _isGridView
+          ? _buildGridView()
+          : _buildListView(),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _addNewNote,
+        backgroundColor: Colors.blueGrey[200],
+        child: const Icon(Icons.edit_note, color: Colors.black87, size: 30),
+      ),
+      bottomNavigationBar: _buildBottomNavigationBar(context),
+    );
+  }
+
+  Widget _buildGridView() {
+    return GridView.builder(
+      padding: const EdgeInsets.all(8),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        crossAxisSpacing: 8,
+        mainAxisSpacing: 8,
+        childAspectRatio: 0.85,
+      ),
+      itemCount: _notes.length,
+      itemBuilder: (context, index) => _buildNoteCard(_notes[index], index),
+    );
+  }
+
+  Widget _buildListView() {
+    return ListView.builder(
+      padding: const EdgeInsets.all(8),
+      itemCount: _notes.length,
+      itemBuilder: (context, index) => _buildNoteCard(_notes[index], index),
+    );
+  }
+
+  Widget _buildNoteCard(Map<String, dynamic> note, int index) {
+    // Process images
+    List<String> imagesList = [];
+    if (note['images'] != null && note['images']
+        .toString()
+        .isNotEmpty) {
+      imagesList = note['images'].toString().split(',');
+    }
+
+    // Process dates
+    DateTime? updatedAt = note['updated_at'] != null
+        ? DateTime.parse(note['updated_at'])
+        : null;
+    DateTime? createdAt = note['created_at'] != null
+        ? DateTime.parse(note['created_at'])
+        : null;
+
+    // Process tags
+    List<String> tagList = [];
+    if (note['tags'] != null && note['tags']
+        .toString()
+        .isNotEmpty) {
+      tagList = note['tags'].toString().split(',')
+          .where((tag) => tag.isNotEmpty)
+          .toList();
+    }
+
+    // Process checklist
+    List<ChecklistItem> checklistItems = [];
+    if (note['checklist'] != null) {
+      final List<dynamic> checklistData = json.decode(
+          note['checklist'] as String);
+      checklistItems = checklistData.map((item) =>
+          ChecklistItem(
+            text: item['text']?.toString() ?? '',
+            isChecked: item['isChecked'] as bool? ?? false,
+          )).toList();
+    }
+
+    return InkWell(
+      onLongPress: () {
+        setState(() {
+          _isSelecting = true;
+          _selectedNotes[index] = true;
+        });
+      },
+      onTap: () {
+        if (_isSelecting) {
+          setState(() {
+            _selectedNotes[index] = !_selectedNotes[index];
+            if (!_selectedNotes.contains(true)) {
+              _isSelecting = false;
+            }
+          });
+        } else {
+          _openNote(note);
+        }
+      },
+      child: Card(
+        color: Color(note['color'] ?? Colors.white.value),
+        child: Container(
+          constraints: BoxConstraints(
+            minHeight: _isGridView ? 200 : 100,
+            maxHeight: _isGridView ? 200 : double.infinity,
+          ),
+          child: Stack(
+            children: [
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8.0),
-                    child: Text(
-                      '${_selectedNotes.where((selected) => selected).length} selected', // Hiển thị số lượng ghi chú đã chọn
-                      style: const TextStyle(fontSize: 16),
+                  if (imagesList.isNotEmpty)
+                    SizedBox(
+                      height: _isGridView ? 50 : 100,
+                      child: imagesList.length == 1
+                          ? _buildSingleImage(imagesList[0])
+                          : _buildImageList(imagesList),
                     ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.delete),
-                    onPressed: () async {
-                      await _deleteSelectedNotes();
-                      _refreshNotes(); // Refresh sau khi xóa
-                    },
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.check),
-                    onPressed: () {
-                      setState(() {
-                        _isSelecting = false;
-                        _selectedNotes = List.filled(_notes.length, false);
-                      });
-                    },
+
+                  Flexible(
+                    fit: FlexFit.loose,
+                    child: Padding(
+                      padding: const EdgeInsets.all(8.0),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildTitleRow(note['title'], index),
+                          const SizedBox(height: 4),
+                          _buildDescription(note['description']),
+                          if (checklistItems.isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              '${checklistItems
+                                  .where((item) => item.isChecked)
+                                  .length}/${checklistItems
+                                  .length} items completed',
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.grey),
+                            ),
+                          ],
+                          if (tagList.isNotEmpty) ...[
+                            const SizedBox(height: 8),
+                            _buildTagsList(tagList),
+                          ],
+                        ],
+                      ),
+                    ),
                   ),
                 ],
               ),
-            PopupMenuButton<String>(
-              icon: const Icon(Icons.more_vert),
-              itemBuilder: (context) => [
-                PopupMenuItem(
-                  value: 'view_as_list',
-                  child: ListTile(
-                    leading: Icon(_isGridView ? Icons.list : Icons.grid_view),
-                    title: Text(_isGridView ? 'View as List' : 'View as Grid'),
+              Positioned(
+                right: 8,
+                bottom: 8,
+                child: Text(
+                  updatedAt != null
+                      ? 'Updated: ${_getFormattedDate(updatedAt)}'
+                      : 'Created: ${_getFormattedDate(createdAt)}',
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: Colors.grey[600],
+                    fontStyle: FontStyle.italic,
                   ),
                 ),
-                PopupMenuItem(
-                  value: 'select_notes',
-                  child: ListTile(
-                    leading: const Icon(Icons.check_circle_outline),
-                    title: Text(_isSelecting ? 'Cancel Selection' : 'Select Notes'),
-                  ),
-                ),
-                PopupMenuItem(
-                  value: 'sync now',
-                  child: ListTile(
-                    leading: const Icon(Icons.sync),
-                    title: const Text('sync now'),
-                    onTap: manualSync,
-                  ),
-                ),
-              ],
-              onSelected: (value) {
-                if (value == 'view_as_list') {
-                  setState(() {
-                    _isGridView = !_isGridView; // Chuyển đổi trạng thái
-                  });
-                } else if (value == 'select_notes') {
-                  setState(() {
-                    _isSelecting = !_isSelecting; // Chuyển đổi trạng thái chọn
-                  });
-                }
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Helper widgets and methods for note card
+  Widget _buildSingleImage(String imagePath) {
+    return Image.file(
+      File(imagePath),
+      fit: BoxFit.cover,
+      width: double.infinity,
+      errorBuilder: (context, error, stackTrace) =>
+      const Icon(Icons.broken_image, size: 50),
+    );
+  }
+
+  Widget _buildImageList(List<String> images) {
+    return ListView.builder(
+      scrollDirection: Axis.horizontal,
+      itemCount: images.length,
+      itemBuilder: (context, imgIndex) =>
+          Padding(
+            padding: const EdgeInsets.only(right: 8.0),
+            child: Image.file(
+              File(images[imgIndex]),
+              fit: BoxFit.cover,
+              width: _isGridView ? 50 : 150,
+              errorBuilder: (context, error, stackTrace) =>
+              const Icon(Icons.broken_image, size: 50),
+            ),
+          ),
+    );
+  }
+
+  Widget _buildTitleRow(String? title, int index) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Text(
+            title ?? 'Untitled',
+            style: TextStyle(
+              fontSize: _isGridView ? 14 : 16,
+              fontWeight: FontWeight.bold,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        if (_isSelecting)
+          SizedBox(
+            height: 24,
+            width: 24,
+            child: Checkbox(
+              value: _selectedNotes[index],
+              onChanged: (bool? value) {
+                setState(() {
+                  _selectedNotes[index] = value ?? false;
+                  if (!_selectedNotes.contains(true)) {
+                    _isSelecting = false;
+                  }
+                });
               },
             ),
+          ),
+      ],
+    );
+  }
 
-          ],
-        ),
-        body: FutureBuilder<List<Map<String, dynamic>>>(
-          future: _fetchNotes(),
-          builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return const Center(child: CircularProgressIndicator());
-            } else if (snapshot.hasError) {
-              return Center(child: Text('Error: ${snapshot.error}'));
-            } else if (!snapshot.hasData || snapshot.data!.isEmpty) {
-              return _buildEmptyState();
-            } else {
-              _notes = snapshot.data!;
-              if (_selectedNotes.length != _notes.length) {
-                _selectedNotes = List.filled(_notes.length, false);
-              }
-              return _isGridView
-                  ? GridView.builder(
-                padding: const EdgeInsets.all(5.0),
-                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 2,
-                  crossAxisSpacing: 8.0,
-                  mainAxisSpacing: 8.0,
+  Widget _buildDescription(String? description) {
+    return Text(
+      description ?? 'No Description',
+      maxLines: _isGridView ? 2 : 3,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(fontSize: _isGridView ? 12 : 14),
+    );
+  }
 
-                ),
+  Widget _buildTagsList(List<String> tags) {
+    return Wrap(
+      spacing: 4,
+      runSpacing: 4,
+      children: tags.map((tag) =>
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              '#$tag',
+              style: TextStyle(
+                fontSize: _isGridView ? 10 : 12,
+                color: Colors.black54,
+              ),
+            ),
+          )).toList(),
+    );
+  }
 
-                itemCount: _notes.length,
-                itemBuilder: (context, index) => _buildNoteCard(_notes[index], index),
-              )
-                  : ListView.builder(
-                padding: const EdgeInsets.all(8.0),
-                itemCount: _notes.length,
-                itemBuilder: (context, index) => _buildNoteCard(_notes[index], index),
-              );
-            }
-          },
-        ),
-        floatingActionButton: FloatingActionButton(
-          onPressed: _addNewNote,
-          backgroundColor: Colors.blueGrey[200],
-          shape: const CircleBorder(),
-          child: const Icon(Icons.edit_note, color: Colors.black87,size: 30,),
+  String _getFormattedDate(DateTime? date) {
+    if (date == null) return '';
+    return '${date.day}/${date.month}/${date.year} ${date.hour}:${date.minute
+        .toString().padLeft(2, '0')}';
+  }
 
-        ),
-
-        bottomNavigationBar: _buildBottomNavigationBar(context)
-
+  Widget _buildEmptyState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.edit_note, size: 100, color: Colors.blueGrey[200]),
+          const SizedBox(height: 16),
+          const Text(
+            'Start taking notes!',
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Tap the new note button below to take a note',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 16, color: Colors.grey),
+          ),
+        ],
+      ),
     );
   }
 
@@ -176,325 +455,136 @@ class _HomePageState extends State<HomePage> {
         ),
       ],
       currentIndex: _selectedIndex,
-      selectedItemColor: Colors.blueGrey, // Đảm bảo rằng màu này hoạt động
-      unselectedItemColor: Colors.grey, // Thêm màu cho mục không được chọn
-      onTap: (int index) {
-        setState(() {
-          _selectedIndex = index;
-        });
-
-        if (index == 1) {
-          Navigator.of(context).push(
-            PageRouteBuilder(
-              pageBuilder: (context, animation, secondaryAnimation) => const SearchPage(),
-              transitionsBuilder: (context, animation, secondaryAnimation, child) {
-                const begin = Offset(1.0, 0.0);
-                const end = Offset.zero;
-                const curve = Curves.easeInOut;
-                var tween = Tween(begin: begin, end: end).chain(CurveTween(curve: curve));
-                var offsetAnimation = animation.drive(tween);
-                return SlideTransition(position: offsetAnimation, child: child);
-              },
-              transitionDuration: const Duration(milliseconds: 300),
-            ),
-          );
-        } else if (index == 2) {
-          Navigator.of(context).push(
-            PageRouteBuilder(
-              pageBuilder: (context, animation, secondaryAnimation) => TagsPage(),
-              transitionsBuilder: (context, animation, secondaryAnimation, child) {
-                const begin = Offset(1.0, 0.0);
-                const end = Offset.zero;
-                const curve = Curves.easeInOut;
-                var tween = Tween(begin: begin, end: end).chain(CurveTween(curve: curve));
-                var offsetAnimation = animation.drive(tween);
-                return SlideTransition(position: offsetAnimation, child: child);
-              },
-              transitionDuration: const Duration(milliseconds: 300),
-            ),
-          );
-        }
-      },
+      selectedItemColor: Colors.blueGrey,
+      unselectedItemColor: Colors.grey,
+      onTap: _handleBottomNavigation,
     );
   }
 
+  void _handleBottomNavigation(int index) {
+    setState(() => _selectedIndex = index);
 
+    if (index == 1) {
+      _navigateWithSlideTransition(SearchPage());
+    } else if (index == 2) {
+      _navigateWithSlideTransition(const TagsPage());
+    }
+  }
 
-  Widget _buildEmptyState() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Icon(Icons.edit_note, size: 100, color: Colors.blueGrey[200]),
-          const SizedBox(height: 16),
-          const Text(
-            'Start taking notes!',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Tap the new note button below to take a note',
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 16, color: Colors.grey),
-          ),
-        ],
+  void _navigateWithSlideTransition(Widget page) {
+    Navigator.of(context).push(
+      PageRouteBuilder(
+        pageBuilder: (context, animation, secondaryAnimation) => page,
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          const begin = Offset(1.0, 0.0);
+          const end = Offset.zero;
+          const curve = Curves.easeInOut;
+          var tween = Tween(begin: begin, end: end).chain(
+              CurveTween(curve: curve));
+          var offsetAnimation = animation.drive(tween);
+          return SlideTransition(position: offsetAnimation, child: child);
+        },
+        transitionDuration: const Duration(milliseconds: 300),
       ),
     );
   }
-
-
-  Widget _buildNoteCard(Map<String, dynamic> note, int index) {
-    // Xử lý danh sách ảnh
-    List<String> imagesList = [];
-    if (note['images'] != null && note['images'].toString().isNotEmpty) {
-      imagesList = note['images'].toString().split(',');
-    }
-
-    // Xử lý ngày tháng
-    DateTime? updatedAt = note['updated_at'] != null
-        ? DateTime.parse(note['updated_at'])
-        : null;
-    DateTime? createdAt = note['created_at'] != null
-        ? DateTime.parse(note['created_at'])
-        : null;
-
-    // Xử lý tags
-    List<String> tags = [];
-    if (note['tags'] != null && note['tags'].toString().isNotEmpty) {
-      tags = note['tags'].toString().split(',');
-    }
-
-    String getFormattedDate(DateTime? date) {
-      if (date == null) return '';
-      return '${date.day}/${date.month}/${date.year} ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
-    }
-
-    return InkWell(
-      onLongPress: () {
-        setState(() {
-          _isSelecting = true;
-          _selectedNotes[index] = true;
-        });
-      },
-      onTap: () {
-        if (_isSelecting) {
-          setState(() {
-            _selectedNotes[index] = !_selectedNotes[index];
-            if (!_selectedNotes.contains(true)) {
-              _isSelecting = false;
-            }
-          });
-        } else {
-          _editNote(note);
-        }
-      },
-      child: Card(
-        color: Color(note['color'] ?? Colors.white),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            return Container(
-              constraints: BoxConstraints(
-                minHeight: _isGridView ? 200 : 100,
-                maxHeight: _isGridView ? 200 : double.infinity,
-              ),
-              child: Stack(
-                children: [
-                  Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Image section
-                      if (imagesList.isNotEmpty)
-                        Container(
-                          height: _isGridView ? 50 : 100,
-                          child: imagesList.length == 1
-                              ? Image.file(
-                            File(imagesList[0]),
-                            fit: BoxFit.cover,
-                            width: double.infinity,
-                            errorBuilder: (context, error, stackTrace) =>
-                            const Icon(Icons.broken_image, size: 50),
-                          )
-                              : ListView.builder(
-                            scrollDirection: Axis.horizontal,
-                            itemCount: imagesList.length,
-                            itemBuilder: (context, imgIndex) => Padding(
-                              padding: const EdgeInsets.only(right: 8.0),
-                              child: Image.file(
-                                File(imagesList[imgIndex]),
-                                fit: BoxFit.cover,
-                                width: _isGridView ? 50 : 150,
-                                errorBuilder: (context, error, stackTrace) =>
-                                const Icon(Icons.broken_image, size: 50),
-                              ),
-                            ),
-                          ),
-                        ),
-
-                      // Content section
-                      Flexible(
-                        fit: FlexFit.loose,
-                        child: Padding(
-                          padding: const EdgeInsets.all(8.0),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              // Title row with checkbox
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Expanded(
-                                    child: Text(
-                                      note['title'] ?? 'No Title',
-                                      style: TextStyle(
-                                        fontSize: _isGridView ? 14 : 16,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
-                                  ),
-                                  if (_isSelecting)
-                                    SizedBox(
-                                      height: 24,
-                                      width: 24,
-                                      child: Checkbox(
-                                        value: _selectedNotes[index],
-                                        onChanged: (bool? value) {
-                                          setState(() {
-                                            _selectedNotes[index] = value ?? false;
-                                            if (!_selectedNotes.contains(true)) {
-                                              _isSelecting = false;
-                                            }
-                                          });
-                                        },
-                                      ),
-                                    ),
-                                ],
-                              ),
-                              const SizedBox(height: 4),
-
-                              // Description
-                              Text(
-                                note['description'] ?? 'No Description',
-                                maxLines: _isGridView ? 2 : 3,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(fontSize: _isGridView ? 12 : 14),
-                              ),
-
-                              // Tags section
-                              if (tags.isNotEmpty) ...[
-                                const SizedBox(height: 8),
-                                Wrap(
-                                  spacing: 4,
-                                  runSpacing: 4,
-                                  children: tags.map((tag) => Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 2,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: Colors.black.withOpacity(0.1),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: Text(
-                                      '#$tag',
-                                      style: TextStyle(
-                                        fontSize: _isGridView ? 10 : 12,
-                                        color: Colors.black54,
-                                      ),
-                                    ),
-                                  )).toList(),
-                                ),
-                              ],
-
-                              const SizedBox(height: 24),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-
-                  // Timestamp positioned at bottom right
-                  Positioned(
-                    right: 8,
-                    bottom: 8,
-                    child: Text(
-                      updatedAt != null
-                          ? 'Updated: ${getFormattedDate(updatedAt)}'
-                          : 'Created: ${getFormattedDate(createdAt)}',
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: Colors.grey[600],
-                        fontStyle: FontStyle.italic,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          },
-        ),
-      ),
-    );
-  }
-
 
   Future<Database> _initDatabase() async {
     Directory documentsDirectory = await getApplicationDocumentsDirectory();
-    String path = join(documentsDirectory.path, 'note_app.db');
+    String dbPath = path.join(documentsDirectory.path, 'noteCK.db');
     return openDatabase(
-      path,
+      dbPath,
       version: 1,
-      onCreate: (db, version) {
-        db.execute('''
-        CREATE TABLE notes (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          title TEXT,
-          description TEXT,
-          images TEXT,
-          reminder TEXT,
-          color INTEGER,
-          checklist TEXT,
-          tags TEXT,
-          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-      ''');
+      onCreate: (db, version) async {
+        await db.execute('''
+          CREATE TABLE notes(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            description TEXT,
+            elements TEXT,
+            images TEXT,
+            reminder TEXT,
+            color INTEGER,
+            tags TEXT,
+            checklist TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+          )
+        ''');
       },
     );
   }
 
-  Future<List<Map<String, dynamic>>> _fetchNotes() async {
-    final db = await _myDatabase;
-    final List<Map<String, dynamic>> notes = await db.query('notes');
-    try {
-      return await db.query('notes');
-    } catch (e) {
-      print('Error fetching notes: $e');
-      return [];
-    }
+  void _addNewNote() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => NoteEditor(myDatabase: _myDatabase),
+      ),
+    );
+    await _loadNotes();
   }
 
-  Future<void> _refreshNotes() async {
-    setState(() {
-      _notesFuture = _fetchNotes();
-    });
+  Future<void> _openNote(Map<String, dynamic> note) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) =>
+            NoteEditor(
+              myDatabase: _myDatabase,
+              note: note,
+            ),
+      ),
+    );
+    await _loadNotes();
   }
-
 
   Future<void> _deleteSelectedNotes() async {
     final db = await _myDatabase;
 
     try {
-      // Bắt đầu transaction
+      // Show confirmation dialog
+      final bool? confirm = await showDialog<bool>(
+        context: context,
+        builder: (context) =>
+            AlertDialog(
+              title: const Text('Delete Notes'),
+              content: const Text(
+                  'Are you sure you want to delete the selected notes?'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  child: const Text('Delete'),
+                ),
+              ],
+            ),
+      );
+
+      if (confirm != true) return;
+
       await db.transaction((txn) async {
         for (int i = 0; i < _notes.length; i++) {
           if (_selectedNotes[i]) {
+            // Delete associated images
+            if (_notes[i]['images'] != null && _notes[i]['images']
+                .toString()
+                .isNotEmpty) {
+              final imagePaths = _notes[i]['images'].toString().split(',');
+              for (final imagePath in imagePaths) {
+                if (imagePath.isNotEmpty) {
+                  final file = File(imagePath);
+                  if (await file.exists()) {
+                    await file.delete();
+                  }
+                }
+              }
+            }
+
+            // Delete note from database
             await txn.delete(
               'notes',
               where: 'id = ?',
@@ -504,14 +594,10 @@ class _HomePageState extends State<HomePage> {
         }
       });
 
-      // Reset selection state
       setState(() {
         _isSelecting = false;
         _selectedNotes = List.filled(_notes.length, false);
       });
-
-      // Refresh notes list
-      _refreshNotes();
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Notes deleted successfully')),
@@ -519,34 +605,57 @@ class _HomePageState extends State<HomePage> {
     } catch (e) {
       print('Error deleting notes: $e');
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Error deleting notes')),
+        SnackBar(content: Text('Error deleting notes: $e')),
       );
     }
   }
 
+  Future<bool> checkInternetConnection() async {
+    var connectivityResult = await (Connectivity().checkConnectivity());
+    return connectivityResult != ConnectivityResult.none;
+  }
+
+  // Firebase sync functionality
   Future<void> manualSync() async {
+    // Kiểm tra kết nối internet
+    bool isConnected = await checkInternetConnection();
+
+    if (!isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No internet connection. Please check your network and try again.'),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
+
     // Hiển thị dialog loading
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (BuildContext context) {
-        return Center(
-          child: Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: const Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircularProgressIndicator(),
-                SizedBox(height: 20),
-                Text(
-                  'Syncing...',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                ),
-              ],
+        return WillPopScope(
+          onWillPop: () async => false,
+          child: Center(
+            child: Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 20),
+                  Text(
+                    'Syncing...',
+                    style: TextStyle(fontSize: 16),
+                  ),
+                ],
+              ),
             ),
           ),
         );
@@ -554,59 +663,56 @@ class _HomePageState extends State<HomePage> {
     );
 
     try {
+      // Thử kết nối Firebase
+      bool isFirebaseAvailable = await _checkFirebaseConnection();
+      if (!isFirebaseAvailable) {
+        throw Exception('Cannot connect to Firebase. Please try again later.');
+      }
+
       await syncWithFirebase(_myDatabase);
-      Navigator.pop(context); // Đóng dialog loading
+
+      // Đóng dialog loading
+      if (context.mounted) Navigator.pop(context);
 
       // Hiển thị thông báo thành công
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('Sync completed successfully'),
-          backgroundColor: Colors.green[200],
-          duration: const Duration(seconds: 2),
-        ),
-      );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Sync completed successfully'),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
 
       setState(() {}); // Cập nhật UI
     } catch (e) {
-      Navigator.pop(context); // Đóng dialog loading
+      // Đóng dialog loading
+      if (context.mounted) Navigator.pop(context);
 
       // Hiển thị thông báo lỗi
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Sync failed: ${e.toString()}'),
-          backgroundColor: Colors.red[400],
-          duration: const Duration(seconds: 3),
-        ),
-      );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Sync failed: ${e.toString()}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
     }
   }
 
-
-
-  void _addNewNote() {
-    Navigator.of(context)
-        .push(
-      MaterialPageRoute(builder: (context) => NoteEditor(myDatabase: _myDatabase)),
-    )
-        .then((_) => setState(() {})); // Refresh notes list after returning
-  }
-
-  void _editNote(Map<String, dynamic> note) {
-    Navigator.of(context).push(
-      PageRouteBuilder(
-        pageBuilder: (context, animation, secondaryAnimation) =>
-            NoteEditor(myDatabase: _myDatabase, note: note),
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          const begin = Offset(0.0, 1.0);
-          const end = Offset.zero;
-          const curve = Curves.easeInOut;
-          var tween = Tween(begin: begin, end: end).chain(CurveTween(curve: curve));
-          var offsetAnimation = animation.drive(tween);
-          return SlideTransition(position: offsetAnimation, child: child);
-        },
-        transitionDuration: const Duration(milliseconds: 300),
-      ),
-    ).then((_) => setState(() {}));
+  Future<bool> _checkFirebaseConnection() async {
+    try {
+      // Thử thực hiện một truy vấn đơn giản để kiểm tra kết nối
+      final firestore = FirebaseFirestore.instance;
+      await firestore.collection('notes').limit(1).get();
+      return true;
+    } catch (e) {
+      print('Firebase connection check failed: $e');
+      return false;
+    }
   }
 
   Future<List<Map<String, dynamic>>> fetchNotesFromFirebase() async {
@@ -614,69 +720,118 @@ class _HomePageState extends State<HomePage> {
     final snapshot = await firestore.collection('notes').get();
 
     return snapshot.docs.map((doc) {
-      final data = doc.data();
-      return {
-        'id': doc.id,
-        ...data,
-        'color': data['color'],
-      };
+      final data = Map<String, dynamic>.from(doc.data());
+
+      // Chuyển đổi các trường số thành string
+      if (data['id'] != null) data['id'] = data['id'].toString();
+      if (data['color'] != null) data['color'] = data['color'].toString();
+
+      return data;
     }).toList();
   }
 
-// Function to push a single note to Firebase
   Future<void> pushNoteToFirebase(Map<String, dynamic> note) async {
     final firestore = FirebaseFirestore.instance;
 
     try {
-      if (note['id'] != null) {
-        await firestore.collection('notes').doc(note['id'].toString()).set(note);
+      // Create a copy of the note to modify
+      final noteToSync = Map<String, dynamic>.from(note);
+
+      // Convert id to string if it exists
+      if (noteToSync['id'] != null) {
+        noteToSync['id'] = noteToSync['id'].toString();
+      }
+
+      // Convert other numeric fields to appropriate types if needed
+      if (noteToSync['color'] != null) {
+        noteToSync['color'] = noteToSync['color'].toString();
+      }
+
+      if (noteToSync['id'] != null) {
+        await firestore.collection('notes').doc(noteToSync['id']).set(noteToSync);
       } else {
-        await firestore.collection('notes').add(note);
+        await firestore.collection('notes').add(noteToSync);
       }
     } catch (e) {
       print('Error pushing note to Firebase: $e');
+      throw e; // Re-throw to handle in UI
     }
   }
 
-// Function to sync SQLite with Firebase
   Future<void> syncWithFirebase(Future<Database> database) async {
-    final db = await database;
-    final notesFromSQLite = await db.query('notes');
-    final notesFromFirebase = await fetchNotesFromFirebase();
-
-    // Sync Firebase -> SQLite
-    for (final firebaseNote in notesFromFirebase) {
-      final existsInSQLite = notesFromSQLite.any((sqliteNote) =>
-      sqliteNote['id'].toString() == firebaseNote['id'].toString());
-
-      if (!existsInSQLite) {
-        // Insert into SQLite
-        await db.insert(
-          'notes',
-          {
-            'id': int.parse(firebaseNote['id']),
-            'title': firebaseNote['title'],
-            'description': firebaseNote['description'],
-            'images': firebaseNote['images'],
-            'reminder': firebaseNote['reminder'],
-            'color': firebaseNote['color'],
-            'checklist': firebaseNote['checklist'],
-            'tags': firebaseNote['tags'],
-            'created_at': firebaseNote['created_at'],
-            'updated_at': firebaseNote['updated_at'],
-          },
-        );
-      }
+    if (!await checkInternetConnection()) {
+      throw Exception('No internet connection');
     }
 
-    // Sync SQLite -> Firebase
-    for (final sqliteNote in notesFromSQLite) {
-      final existsInFirebase = notesFromFirebase.any((firebaseNote) =>
-      firebaseNote['id'].toString() == sqliteNote['id'].toString());
+    final db = await database;
 
-      if (!existsInFirebase) {
-        await pushNoteToFirebase(sqliteNote);
+    try {
+      final notesFromSQLite = await db.query('notes');
+      final notesFromFirebase = await fetchNotesFromFirebase();
+
+      // Sync Firebase -> SQLite
+      for (final firebaseNote in notesFromFirebase) {
+        try {
+          final existsInSQLite = notesFromSQLite.any((sqliteNote) =>
+          sqliteNote['id'].toString() == firebaseNote['id'].toString());
+
+          if (!existsInSQLite) {
+            int? color;
+            if (firebaseNote['color'] != null) {
+              color = int.tryParse(firebaseNote['color'].toString());
+            }
+
+            await db.insert(
+              'notes',
+              {
+                'id': int.parse(firebaseNote['id']),
+                'title': firebaseNote['title'],
+                'description': firebaseNote['description'],
+                'elements': firebaseNote['elements'],
+                'images': firebaseNote['images'],
+                'reminder': firebaseNote['reminder'],
+                'color': color,
+                'checklist': firebaseNote['checklist'],
+                'tags': firebaseNote['tags'],
+                'created_at': firebaseNote['created_at'],
+                'updated_at': firebaseNote['updated_at'],
+              },
+            );
+          }
+        } catch (e) {
+          print('Error syncing Firebase note to SQLite: $e');
+          continue;
+        }
       }
+
+      // Sync SQLite -> Firebase
+      for (final sqliteNote in notesFromSQLite) {
+        try {
+          final existsInFirebase = notesFromFirebase.any((firebaseNote) =>
+          firebaseNote['id'].toString() == sqliteNote['id'].toString());
+
+          if (!existsInFirebase) {
+            await pushNoteToFirebase(sqliteNote);
+          }
+        } catch (e) {
+          print('Error syncing SQLite note to Firebase: $e');
+          continue;
+        }
+      }
+    } catch (e) {
+      print('General sync error: $e');
+      throw Exception('Sync failed: ${e.toString()}');
     }
   }
+}
+
+// Helper class for checklist items
+class ChecklistItem {
+  final String text;
+  final bool isChecked;
+
+  ChecklistItem({
+    required this.text,
+    required this.isChecked,
+  });
 }

@@ -71,11 +71,14 @@ class _SearchPageState extends State<SearchPage> {
                 itemCount: _notes.length,
                 itemBuilder: (context, index) {
                   final note = _notes[index];
+                  DateTime? createdAt = note['created_at'] != null
+                      ? DateTime.parse(note['created_at'])
+                      : null;
                   return Card(
                     color: Color(note['color'] ?? Colors.white.value),
                     child: ListTile(
                       title: Text(note['title'] ?? 'No Title'),
-                      subtitle: Text(note['created_at'] ?? 'No created_at'),
+                      subtitle: Text(_getFormattedDate(createdAt) ?? 'No created_at'),
                       onTap: () {
                         Navigator.of(context).push(
                           MaterialPageRoute(
@@ -96,10 +99,14 @@ class _SearchPageState extends State<SearchPage> {
       ),
     );
   }
+  String _getFormattedDate(DateTime? date) {
+    if (date == null) return '';
+    return '${date.day}/${date.month}/${date.year} ${date.hour}:${date.minute.toString().padLeft(2, '0')}';
+  }
 
   Future<Database> _initDatabase() async {
     Directory documentsDirectory = await getApplicationDocumentsDirectory();
-    String path = join(documentsDirectory.path, 'note_app.db');
+    String path = join(documentsDirectory.path, 'noteCK.db');
     return openDatabase(path, version: 1);
   }
 

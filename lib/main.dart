@@ -6,6 +6,7 @@ import 'package:test_note/home_page/home_page.dart';
 import 'package:test_note/search_page/search_page.dart';
 import 'package:test_note/tags_page/tags_page.dart';
 
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   tz.initializeTimeZones();
@@ -15,7 +16,7 @@ void main() async {
   runApp(MaterialApp(
     initialRoute: '/',
     routes: {
-      '/': (context) => const HomePage(),
+      '/': (context) => const NotesHomePage(),
       '/search': (context) => const SearchPage(),
       '/tags': (context) => const TagsPage(),
     },
@@ -30,7 +31,6 @@ void main() async {
     ),
   ));
 }
-
 //
 // class HomePage extends StatefulWidget {
 //   const HomePage();
