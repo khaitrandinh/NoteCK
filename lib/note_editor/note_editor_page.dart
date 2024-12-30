@@ -8,6 +8,8 @@ import 'package:timezone/data/latest.dart' as tz;
 import 'package:sqflite/sqflite.dart';
 import 'dart:io';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
+import 'package:test_note/home_page/home_page.dart';
+import 'package:test_note/utils/sync_utils.dart';
 
 enum NoteElementType { text, checklist, image }
 
@@ -114,10 +116,31 @@ class _NoteEditorState extends State<NoteEditor> {
   Widget build(BuildContext context) {
     return WillPopScope(
       onWillPop: () async {
-        if (_hasChanges) {
-          await _saveNote();
+        try {
+          if (_hasChanges) {
+            // Lưu note và đợi kết quả
+            final saved = await _saveNote();
+            if (!saved) {
+              // Nếu lưu thất bại, show thông báo và không thoát
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Error saving note')),
+                );
+              }
+              return false;
+            }
+          }
+
+          if (mounted && Navigator.canPop(context)) {
+            // Chỉ pop khi widget vẫn mounted và có thể pop
+            Navigator.pop(context);
+            return false; // Trả về false vì đã xử lý pop thủ công
+          }
+          return true; // Cho phép pop tự động nếu không thể xử lý
+        } catch (e) {
+          print('Error handling back press: $e');
+          return false;
         }
-        return true;
       },
       child: Scaffold(
         backgroundColor: _color,
@@ -272,9 +295,7 @@ class _NoteEditorState extends State<NoteEditor> {
             ),
             Expanded(
               child: TextField(
-                controller: element.textController ?? TextEditingController(text: element.content)..addListener(() {
-                  element.content = element.textController?.text ?? '';
-                }),
+                controller: element.textController ??= TextEditingController(text: element.content),
                 onChanged: (value) {
                   setState(() {
                     element.content = value;
@@ -606,8 +627,10 @@ class _NoteEditorState extends State<NoteEditor> {
     );
   }
 
-  Future<void> _saveNote() async {
-    if (!_hasChanges) return;
+  Future<bool> _saveNote() async {
+    if (!_hasChanges) {
+      return true; // Trả về true nếu không có thay đổi cần lưu
+    }
 
     final db = await widget.myDatabase;
     final now = DateTime.now().toIso8601String();
@@ -652,6 +675,7 @@ class _NoteEditorState extends State<NoteEditor> {
         'updated_at': now,
       };
 
+      int? noteId;
       await db.transaction((txn) async {
         if (widget.note != null && widget.note!.containsKey('id')) {
           // Handle update
@@ -667,8 +691,7 @@ class _NoteEditorState extends State<NoteEditor> {
             if (oldImagesStr != null && oldImagesStr.isNotEmpty) {
               final oldImagePaths = oldImagesStr.split(',');
               for (final oldPath in oldImagePaths) {
-                if (oldPath.isNotEmpty &&
-                    !imagePaths.contains(oldPath)) {
+                if (oldPath.isNotEmpty && !imagePaths.contains(oldPath)) {
                   final oldFile = File(oldPath);
                   if (await oldFile.exists()) {
                     await oldFile.delete();
@@ -684,20 +707,32 @@ class _NoteEditorState extends State<NoteEditor> {
             where: 'id = ?',
             whereArgs: [widget.note!['id']],
           );
+          noteId = widget.note!['id'];
         } else {
           // Handle insert
           note['created_at'] = now;
-          await txn.insert('notes', note);
+          noteId = await txn.insert('notes', note);
         }
       });
 
       setState(() => _hasChanges = false);
+
+      // Try to sync with Firebase if connected
+      try {
+        if (await SyncUtils.checkInternetConnection()) {
+          await SyncUtils.syncWithFirebase(widget.myDatabase);
+        }
+      } catch (e) {
+        print('Error syncing with Firebase: $e');
+        // Don't throw here as the note is already saved locally
+      }
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Note saved successfully')),
         );
       }
+      return true;
     } catch (e) {
       print('Error saving note: $e');
       if (mounted) {
@@ -705,6 +740,7 @@ class _NoteEditorState extends State<NoteEditor> {
           SnackBar(content: Text('Error saving note: ${e.toString()}')),
         );
       }
+      return false;
     }
   }
 

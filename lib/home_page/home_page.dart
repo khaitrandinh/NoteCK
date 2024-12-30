@@ -10,6 +10,7 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import '../note_editor/note_editor_page.dart';
 import 'package:test_note/search_page/search_page.dart';
 import 'package:test_note/tags_page/tags_page.dart';
+import 'package:test_note/utils/sync_utils.dart';
 
 class NotesHomePage extends StatefulWidget {
   const NotesHomePage({Key? key}) : super(key: key);
@@ -33,34 +34,22 @@ class _NotesHomePageState extends State<NotesHomePage> {
     super.initState();
     _myDatabase = _initDatabase();
     _notesFuture = _loadNotes();
-    syncWithFirebase(_myDatabase).then((_) => setState(() {}));
+    _initializeData();
   }
 
   Future<List<Map<String, dynamic>>> _loadNotes() async {
-    setState(() => _isLoading = true);
-    try {
-      final db = await _myDatabase;
-      final List<Map<String, dynamic>> notes = await db.query(
-        'notes',
-        orderBy: 'updated_at DESC',
-      );
-
+    final db = await _myDatabase;
+    final notes = await db.query(
+      'notes',
+      orderBy: 'updated_at DESC',
+    );
+    if (mounted) {
       setState(() {
         _notes = notes;
         _selectedNotes = List.filled(notes.length, false);
-        _isLoading = false;
       });
-      return notes; // Trả về notes thay vì void
-    } catch (e) {
-      print('Error loading notes: $e');
-      setState(() => _isLoading = false);
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error loading notes: $e')),
-        );
-      }
-      return []; // Trả về list rỗng trong trường hợp có lỗi
     }
+    return notes;
   }
 
   @override
@@ -68,7 +57,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Colors.blueGrey[200],
-        title: const Text('My Notes'),
+        title: const Text('NoteCK'),
         actions: [
           if (_isSelecting)
             Row(
@@ -489,6 +478,29 @@ class _NotesHomePageState extends State<NotesHomePage> {
     );
   }
 
+  Future<void> _initializeData() async {
+    setState(() => _isLoading = true);
+    try {
+      // 1. Đợi đồng bộ hoàn tất trước
+      await SyncUtils.syncWithFirebase(_myDatabase);
+
+      // 2. Sau đó mới load notes
+      _notes = await _loadNotes();
+      _selectedNotes = List.filled(_notes.length, false);
+    } catch (e) {
+      print('Error initializing data: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error loading data: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
   Future<Database> _initDatabase() async {
     Directory documentsDirectory = await getApplicationDocumentsDirectory();
     String dbPath = path.join(documentsDirectory.path, 'noteCK.db');
@@ -546,33 +558,33 @@ class _NotesHomePageState extends State<NotesHomePage> {
       // Show confirmation dialog
       final bool? confirm = await showDialog<bool>(
         context: context,
-        builder: (context) =>
-            AlertDialog(
-              title: const Text('Delete Notes'),
-              content: const Text(
-                  'Are you sure you want to delete the selected notes?'),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(false),
-                  child: const Text('Cancel'),
-                ),
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(true),
-                  child: const Text('Delete'),
-                ),
-              ],
+        builder: (context) => AlertDialog(
+          title: const Text('Delete Notes'),
+          content: const Text('Are you sure you want to delete the selected notes?'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel'),
             ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('Delete'),
+            ),
+          ],
+        ),
       );
 
       if (confirm != true) return;
 
+      // Keep track of deleted note IDs
+      List<String> deletedNoteIds = [];
+
+      // Start a database transaction
       await db.transaction((txn) async {
-        for (int i = 0; i < _notes.length; i++) {
-          if (_selectedNotes[i]) {
+        for (int i = 0; i < _selectedNotes.length; i++) {
+          if (_selectedNotes[i] && i < _notes.length) {
             // Delete associated images
-            if (_notes[i]['images'] != null && _notes[i]['images']
-                .toString()
-                .isNotEmpty) {
+            if (_notes[i]['images'] != null && _notes[i]['images'].toString().isNotEmpty) {
               final imagePaths = _notes[i]['images'].toString().split(',');
               for (final imagePath in imagePaths) {
                 if (imagePath.isNotEmpty) {
@@ -584,41 +596,81 @@ class _NotesHomePageState extends State<NotesHomePage> {
               }
             }
 
-            // Delete note from database
+            // Delete from local database
             await txn.delete(
               'notes',
               where: 'id = ?',
               whereArgs: [_notes[i]['id']],
             );
+
+            // Add to list of deleted note IDs
+            deletedNoteIds.add(_notes[i]['id'].toString());
           }
         }
       });
 
+      // Delete from Firebase if connected
+      if (await SyncUtils.checkInternetConnection()) {
+        try {
+          final firestore = FirebaseFirestore.instance;
+          for (String noteId in deletedNoteIds) {
+            await firestore.collection('notes').doc(noteId).delete();
+          }
+        } catch (e) {
+          print('Error deleting notes from Firebase: $e');
+          // Don't throw here - we want to continue even if Firebase sync fails
+        }
+      }
+
+      // Update local state
       setState(() {
+        // Remove deleted notes from the list
+        _notes = _notes.where((note) => !deletedNoteIds.contains(note['id'].toString())).toList();
+        // Reset selection state
+        _selectedNotes = List.filled(_notes.length, false);
         _isSelecting = false;
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Notes deleted successfully'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+
+      // Refresh notes list
+      _notes = await _loadNotes();
+      setState(() {
         _selectedNotes = List.filled(_notes.length, false);
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Notes deleted successfully')),
-      );
     } catch (e) {
       print('Error deleting notes: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error deleting notes: $e')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error deleting notes: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
     }
   }
 
-  Future<bool> checkInternetConnection() async {
-    var connectivityResult = await (Connectivity().checkConnectivity());
-    return connectivityResult != ConnectivityResult.none;
-  }
+
+
+  // Future<bool> checkInternetConnection() async {
+  //   var connectivityResult = await (Connectivity().checkConnectivity());
+  //   return connectivityResult != ConnectivityResult.none;
+  // }
 
   // Firebase sync functionality
   Future<void> manualSync() async {
     // Kiểm tra kết nối internet
-    bool isConnected = await checkInternetConnection();
+    bool isConnected = await SyncUtils.checkInternetConnection();
 
     if (!isConnected) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -669,7 +721,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
         throw Exception('Cannot connect to Firebase. Please try again later.');
       }
 
-      await syncWithFirebase(_myDatabase);
+      await SyncUtils.syncWithFirebase(_myDatabase);
 
       // Đóng dialog loading
       if (context.mounted) Navigator.pop(context);
@@ -715,114 +767,135 @@ class _NotesHomePageState extends State<NotesHomePage> {
     }
   }
 
-  Future<List<Map<String, dynamic>>> fetchNotesFromFirebase() async {
-    final firestore = FirebaseFirestore.instance;
-    final snapshot = await firestore.collection('notes').get();
+  // Future<List<Map<String, dynamic>>> fetchNotesFromFirebase() async {
+  //   final firestore = FirebaseFirestore.instance;
+  //   final snapshot = await firestore.collection('notes').get();
+  //
+  //   return snapshot.docs.map((doc) {
+  //     final data = Map<String, dynamic>.from(doc.data());
+  //
+  //     // Chuyển đổi các trường số thành string
+  //     if (data['id'] != null) data['id'] = data['id'].toString();
+  //     if (data['color'] != null) data['color'] = data['color'].toString();
+  //
+  //     return data;
+  //   }).toList();
+  // }
+  //
+  // Future<void> pushNoteToFirebase(Map<String, dynamic> note) async {
+  //   final firestore = FirebaseFirestore.instance;
+  //
+  //   try {
+  //     // Create a copy of the note to modify
+  //     final noteToSync = Map<String, dynamic>.from(note);
+  //
+  //     // Convert id to string if it exists
+  //     if (noteToSync['id'] != null) {
+  //       noteToSync['id'] = noteToSync['id'].toString();
+  //     }
+  //
+  //     // Convert other numeric fields to appropriate types if needed
+  //     if (noteToSync['color'] != null) {
+  //       noteToSync['color'] = noteToSync['color'].toString();
+  //     }
+  //
+  //     if (noteToSync['id'] != null) {
+  //       await firestore.collection('notes').doc(noteToSync['id']).set(noteToSync);
+  //     } else {
+  //       await firestore.collection('notes').add(noteToSync);
+  //     }
+  //   } catch (e) {
+  //     print('Error pushing note to Firebase: $e');
+  //     throw e; // Re-throw to handle in UI
+  //   }
+  // }
 
-    return snapshot.docs.map((doc) {
-      final data = Map<String, dynamic>.from(doc.data());
-
-      // Chuyển đổi các trường số thành string
-      if (data['id'] != null) data['id'] = data['id'].toString();
-      if (data['color'] != null) data['color'] = data['color'].toString();
-
-      return data;
-    }).toList();
-  }
-
-  Future<void> pushNoteToFirebase(Map<String, dynamic> note) async {
-    final firestore = FirebaseFirestore.instance;
-
-    try {
-      // Create a copy of the note to modify
-      final noteToSync = Map<String, dynamic>.from(note);
-
-      // Convert id to string if it exists
-      if (noteToSync['id'] != null) {
-        noteToSync['id'] = noteToSync['id'].toString();
-      }
-
-      // Convert other numeric fields to appropriate types if needed
-      if (noteToSync['color'] != null) {
-        noteToSync['color'] = noteToSync['color'].toString();
-      }
-
-      if (noteToSync['id'] != null) {
-        await firestore.collection('notes').doc(noteToSync['id']).set(noteToSync);
-      } else {
-        await firestore.collection('notes').add(noteToSync);
-      }
-    } catch (e) {
-      print('Error pushing note to Firebase: $e');
-      throw e; // Re-throw to handle in UI
-    }
-  }
-
-  Future<void> syncWithFirebase(Future<Database> database) async {
-    if (!await checkInternetConnection()) {
-      throw Exception('No internet connection');
-    }
-
-    final db = await database;
-
-    try {
-      final notesFromSQLite = await db.query('notes');
-      final notesFromFirebase = await fetchNotesFromFirebase();
-
-      // Sync Firebase -> SQLite
-      for (final firebaseNote in notesFromFirebase) {
-        try {
-          final existsInSQLite = notesFromSQLite.any((sqliteNote) =>
-          sqliteNote['id'].toString() == firebaseNote['id'].toString());
-
-          if (!existsInSQLite) {
-            int? color;
-            if (firebaseNote['color'] != null) {
-              color = int.tryParse(firebaseNote['color'].toString());
-            }
-
-            await db.insert(
-              'notes',
-              {
-                'id': int.parse(firebaseNote['id']),
-                'title': firebaseNote['title'],
-                'description': firebaseNote['description'],
-                'elements': firebaseNote['elements'],
-                'images': firebaseNote['images'],
-                'reminder': firebaseNote['reminder'],
-                'color': color,
-                'checklist': firebaseNote['checklist'],
-                'tags': firebaseNote['tags'],
-                'created_at': firebaseNote['created_at'],
-                'updated_at': firebaseNote['updated_at'],
-              },
-            );
-          }
-        } catch (e) {
-          print('Error syncing Firebase note to SQLite: $e');
-          continue;
-        }
-      }
-
-      // Sync SQLite -> Firebase
-      for (final sqliteNote in notesFromSQLite) {
-        try {
-          final existsInFirebase = notesFromFirebase.any((firebaseNote) =>
-          firebaseNote['id'].toString() == sqliteNote['id'].toString());
-
-          if (!existsInFirebase) {
-            await pushNoteToFirebase(sqliteNote);
-          }
-        } catch (e) {
-          print('Error syncing SQLite note to Firebase: $e');
-          continue;
-        }
-      }
-    } catch (e) {
-      print('General sync error: $e');
-      throw Exception('Sync failed: ${e.toString()}');
-    }
-  }
+  // Future<void> syncWithFirebase(Future<Database> database) async {
+  //   if (!await checkInternetConnection()) {
+  //     throw Exception('No internet connection');
+  //   }
+  //
+  //   final db = await database;
+  //
+  //   try {
+  //     final notesFromSQLite = await db.query('notes');
+  //     final notesFromFirebase = await fetchNotesFromFirebase();
+  //
+  //     // Sync Firebase -> SQLite
+  //     for (final firebaseNote in notesFromFirebase) {
+  //       try {
+  //         final sqliteNote = notesFromSQLite.firstWhere(
+  //               (note) => note['id'].toString() == firebaseNote['id'].toString(),
+  //           orElse: () => {},
+  //         );
+  //
+  //         // Convert dates to String and handle null cases
+  //         final firebaseUpdatedAt = firebaseNote['updated_at']?.toString() ?? DateTime.now().toIso8601String();
+  //         final sqliteUpdatedAt = sqliteNote['updated_at']?.toString() ?? '';
+  //
+  //         // Nếu note không tồn tại hoặc Firebase version mới hơn
+  //         if (sqliteNote.isEmpty ||
+  //             DateTime.parse(firebaseUpdatedAt).isAfter(
+  //                 DateTime.parse(sqliteUpdatedAt)
+  //             )) {
+  //           int? color;
+  //           if (firebaseNote['color'] != null) {
+  //             color = int.tryParse(firebaseNote['color'].toString());
+  //           }
+  //
+  //           await db.insert(
+  //             'notes',
+  //             {
+  //               'id': int.parse(firebaseNote['id']),
+  //               'title': firebaseNote['title']?.toString() ?? '',
+  //               'description': firebaseNote['description']?.toString() ?? '',
+  //               'elements': firebaseNote['elements']?.toString() ?? '',
+  //               'images': firebaseNote['images']?.toString() ?? '',
+  //               'reminder': firebaseNote['reminder']?.toString() ?? '',
+  //               'color': color,
+  //               'checklist': firebaseNote['checklist']?.toString() ?? '',
+  //               'tags': firebaseNote['tags']?.toString() ?? '',
+  //               'created_at': firebaseNote['created_at']?.toString() ?? DateTime.now().toIso8601String(),
+  //               'updated_at': firebaseUpdatedAt,
+  //             },
+  //             conflictAlgorithm: ConflictAlgorithm.replace,
+  //           );
+  //         }
+  //       } catch (e) {
+  //         print('Error syncing Firebase note to SQLite: $e');
+  //         continue;
+  //       }
+  //     }
+  //
+  //     // Sync SQLite -> Firebase
+  //     for (final sqliteNote in notesFromSQLite) {
+  //       try {
+  //         final firebaseNote = notesFromFirebase.firstWhere(
+  //               (note) => note['id'].toString() == sqliteNote['id'].toString(),
+  //           orElse: () => {},
+  //         );
+  //
+  //         // Convert dates to String and handle null cases
+  //         final sqliteUpdatedAt = sqliteNote['updated_at']?.toString() ?? DateTime.now().toIso8601String();
+  //         final firebaseUpdatedAt = firebaseNote['updated_at']?.toString() ?? '';
+  //
+  //         // Nếu note không tồn tại trên Firebase hoặc SQLite version mới hơn
+  //         if (firebaseNote.isEmpty ||
+  //             DateTime.parse(sqliteUpdatedAt).isAfter(
+  //                 DateTime.parse(firebaseUpdatedAt)
+  //             )) {
+  //           await pushNoteToFirebase(sqliteNote);
+  //         }
+  //       } catch (e) {
+  //         print('Error syncing SQLite note to Firebase: $e');
+  //         continue;
+  //       }
+  //     }
+  //   } catch (e) {
+  //     print('General sync error: $e');
+  //     throw Exception('Sync failed: ${e.toString()}');
+  //   }
+  // }
 }
 
 // Helper class for checklist items
