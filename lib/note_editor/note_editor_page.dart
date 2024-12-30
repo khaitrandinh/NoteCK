@@ -8,7 +8,6 @@ import 'package:timezone/data/latest.dart' as tz;
 import 'package:sqflite/sqflite.dart';
 import 'dart:io';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
-import 'package:test_note/home_page/home_page.dart';
 import 'package:test_note/utils/sync_utils.dart';
 
 enum NoteElementType { text, checklist, image }
@@ -18,8 +17,9 @@ class NoteElement {
   String content;
   bool isChecked;
   File? image;
-  // Add TextEditingController for text elements
   TextEditingController? textController;
+  FocusNode? focusNode;
+
 
   NoteElement({
     required this.type,
@@ -27,18 +27,18 @@ class NoteElement {
     this.isChecked = false,
     this.image,
   }) {
-    // Initialize controller if this is a text element
-    if (type == NoteElementType.text) {
+    if (type == NoteElementType.text || type == NoteElementType.checklist) {
       textController = TextEditingController(text: content);
-      // Update content when text changes
+      focusNode = FocusNode(); // Khởi tạo focusNode
       textController!.addListener(() {
         content = textController!.text;
       });
     }
   }
-  // Add dispose method to clean up controller
+
   void dispose() {
     textController?.dispose();
+    focusNode?.dispose(); // Dispose focusNode
   }
 }
 
@@ -82,19 +82,27 @@ class _NoteEditorState extends State<NoteEditor> {
   bool _isUnderlined = false;
   Timer? _autoSaveTimer;
   bool _hasChanges = false;
+  int _currentFocusIndex = -1;
+  bool _isFavorite = false;
 
   @override
   void initState() {
     super.initState();
     _initTimeZone();
     _initializeNotifications();
-    _loadExistingNote();
     if (widget.serializedNote != null) {
       _loadElements(widget.serializedNote!);
+    } else {
+      // Thêm text element mặc định nếu là note mới
+      _noteElements.add(NoteElement(type: NoteElementType.text));
     }
+    _loadExistingNote();
     _setupAutoSave();
     _setupTextControllerListeners();
     _requestNotificationPermission();
+    if (widget.note != null) {
+      _isFavorite = widget.note!['is_favorite'] == 1;
+    }
   }
 
   @override
@@ -142,182 +150,240 @@ class _NoteEditorState extends State<NoteEditor> {
           return false;
         }
       },
-      child: Scaffold(
-        backgroundColor: _color,
-        body: NestedScrollView(
-          headerSliverBuilder: (context, innerBoxIsScrolled) {
-            return [
-              SliverAppBar(
-                floating: true,
-                snap: true,
-                pinned: false,
-                backgroundColor: Colors.blueGrey[200],
-                elevation: 0,
-                leading: IconButton(
-                  icon: const Icon(Icons.arrow_back_ios, color: Colors.black),
-                  onPressed: () async {
-                    if (_hasChanges) {
-                      await _saveNote();
-                    }
-                    Navigator.of(context).pop();
-                  },
+      child: GestureDetector(
+        onTapDown: (details) => _handleTapOutside(),
+        child: Scaffold(
+          backgroundColor: _color,
+          body: NestedScrollView(
+            headerSliverBuilder: (context, innerBoxIsScrolled) {
+              return [
+                SliverAppBar(
+                  floating: true,
+                  snap: true,
+                  pinned: false,
+                  backgroundColor: Colors.blueGrey[200],
+                  elevation: 0,
+                  leading: IconButton(
+                    icon: const Icon(Icons.arrow_back_ios, color: Colors.black),
+                    onPressed: () async {
+                      if (_hasChanges) {
+                        await _saveNote();
+                      }
+                      Navigator.of(context).pop();
+                    },
+                  ),
+                  actions: [
+                    IconButton(
+                      icon: Icon(
+                        _isFavorite ? Icons.star : Icons.star_border,
+                        color: _isFavorite ? Colors.amber : Colors.black,
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          _isFavorite = !_isFavorite;
+                          _hasChanges = true;
+                        });
+                      },
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.alarm, color: Colors.black),
+                      onPressed: _setReminder,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.local_offer_outlined, color: Colors.black),
+                      onPressed: _showTagsDialog,
+                    ),
+                  ],
                 ),
-                actions: [
-                  IconButton(
-                    icon: const Icon(Icons.alarm, color: Colors.black),
-                    onPressed: _setReminder,
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.local_offer_outlined, color: Colors.black),
-                    onPressed: _showTagsDialog,
-                  ),
-                ],
-              ),
-              SliverToBoxAdapter(
-                child: Column(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: TextField(
-                        // _titleController.text.isNotEmpty ? _titleController.text : 'Note Reminder';
-                        controller: _titleController,
-                        style: const TextStyle(
-                          fontSize: 24.0,
-                          fontWeight: FontWeight.bold,
-                        ),
-                        decoration: const InputDecoration(
-                          hintText: 'Title',
-                          border: InputBorder.none,
-                        ),
-                        maxLines: 1,
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
-                      child: TextField(
-                        controller: _descriptionController,
-                        style: const TextStyle(
-                          fontSize: 16.0,
-                        ),
-                        decoration: const InputDecoration(
-                          hintText: 'Add description...',
-                          border: InputBorder.none,
-                        ),
-                        maxLines: 1,
-                      ),
-                    ),
-                    if (_reminder != null)
+                SliverToBoxAdapter(
+                  child: Column(
+                    children: [
                       Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8.0),
-                        child: Chip(
-                          label: Text(
-                            'Reminder: ${_formatDateTime(_reminder!)}',
-                            style: const TextStyle(fontSize: 12),
+                        padding: const EdgeInsets.all(16.0),
+                        child: TextField(
+                          controller: _titleController,
+                          style: const TextStyle(
+                            fontSize: 24.0,
+                            fontWeight: FontWeight.bold,
                           ),
-                          deleteIcon: const Icon(Icons.close, size: 16),
-                          onDeleted: () => setState(() => _reminder = null),
+                          decoration: const InputDecoration(
+                            hintText: 'Title',
+                            border: InputBorder.none,
+                          ),
+                          maxLines: 1,
                         ),
                       ),
-                    if (_tagsController.text.isNotEmpty)
-                      Wrap(
-                        spacing: 8.0,
-                        children: _tagsController.text.split(',').map((tag) {
-                          return Chip(
-                            label: Text(tag.trim()),
-                            backgroundColor: Colors.grey[200],
-                          );
-                        }).toList(),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                        child: TextField(
+                          controller: _descriptionController,
+                          style: const TextStyle(
+                            fontSize: 16.0,
+                          ),
+                          decoration: const InputDecoration(
+                            hintText: 'Add description...',
+                            border: InputBorder.none,
+                          ),
+                          maxLines: 1,
+                        ),
                       ),
+                      if (_reminder != null)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 8.0),
+                          child: Chip(
+                            label: Text(
+                              'Reminder: ${_formatDateTime(_reminder!)}',
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            deleteIcon: const Icon(Icons.close, size: 16),
+                            onDeleted: () => setState(() => _reminder = null),
+                          ),
+                        ),
+                      if (_tagsController.text.isNotEmpty)
+                        Wrap(
+                          spacing: 8.0,
+                          children: _tagsController.text.split(',').map((tag) {
+                            return Chip(
+                              label: Text(tag.trim()),
+                              backgroundColor: Colors.grey[200],
+                            );
+                          }).toList(),
+                        ),
 
-                    const Divider(height: 1),
-                  ],
+                      const Divider(height: 1),
+                    ],
+                  ),
                 ),
-              ),
-            ];
-          },
-          body: Column(
-            children: [
-              Expanded(
-                child: ReorderableListView(
-                  onReorder: (oldIndex, newIndex) {
-                    setState(() {
-                      if (newIndex > oldIndex) newIndex -= 1;
-                      final element = _noteElements.removeAt(oldIndex);
-                      _noteElements.insert(newIndex, element);
-                      _hasChanges = true;
-                    });
-                  },
-                  children: [
-                    for (int index = 0; index < _noteElements.length; index++)
-                      ListTile(
-                        key: ValueKey(_noteElements[index]),
-                        title: _buildElementWidget(_noteElements[index], index),
-                      ),
-                  ],
+              ];
+            },
+            body: Column(
+              children: [
+                Expanded(
+                  child: Container(
+                    padding: EdgeInsets.zero,
+                    child: ReorderableListView(
+                      onReorder: (oldIndex, newIndex) {
+                        setState(() {
+                          if (newIndex > oldIndex) newIndex -= 1;
+                          final element = _noteElements.removeAt(oldIndex);
+                          _noteElements.insert(newIndex, element);
+                          _hasChanges = true;
+                        });
+                      },
+                      children: [
+                        for (int index = 0; index < _noteElements.length; index++)
+                          Padding(
+                            key: ValueKey(_noteElements[index]),
+                            padding: const EdgeInsets.symmetric(vertical: 0), // Sát nhất có thể
+                            child: _buildElementWidget(_noteElements[index], index),
+                          ),
+                      ],
+                    ),
+                  ),
                 ),
-              ),
-              _buildBottomToolbar(),
-            ],
+
+                _buildBottomToolbar(),
+              ],
+            ),
           ),
         ),
-      ),
+      )
     );
   }
 
   Widget _buildElementWidget(NoteElement element, int index) {
     switch (element.type) {
       case NoteElementType.text:
-        return TextField(
-          controller: element.textController,
-          style: _currentTextStyle,
-          onChanged: (value) {
-            setState(() {
-              element.content = value;
-              _hasChanges = true;
-            });
+        return Focus(
+          onFocusChange: (hasFocus) {
+            if (hasFocus) {
+              setState(() {
+                _currentFocusIndex = index;
+              });
+            }
           },
-          decoration: const InputDecoration(
-            border: InputBorder.none,
-            hintText: 'Text',
+          child: TextField(
+            controller: element.textController,
+            focusNode: element.focusNode,
+            style: _currentTextStyle,
+            onChanged: (value) {
+              setState(() {
+                element.content = value;
+                _hasChanges = true;
+
+                // Nếu text trống, xóa phần tử
+                if (value.isEmpty) {
+                  _noteElements.removeAt(index);
+                }
+              });
+            },
+            onSubmitted: (value) {
+              // Khi nhấn Enter, thêm text mới
+              if (value.isNotEmpty) {
+                setState(() {
+                  _noteElements.insert(index + 1, NoteElement(type: NoteElementType.text));
+                  _hasChanges = true;
+
+                  // Focus vào phần tử mới
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    _noteElements[index + 1].focusNode?.requestFocus();
+                  });
+                });
+              }
+            },
+            decoration: const InputDecoration(
+              border: InputBorder.none,
+              hintText: '',
+            ),
           ),
         );
       case NoteElementType.checklist:
-        return Row(
-          children: [
-            Checkbox(
-              value: element.isChecked,
-              onChanged: (value) {
-                setState(() {
-                  element.isChecked = value ?? false;
-                  _hasChanges = true;
-                });
-              },
-            ),
-            Expanded(
-              child: TextField(
-                controller: element.textController ??= TextEditingController(text: element.content),
+        return Focus(
+          onFocusChange: (hasFocus) {
+            if (hasFocus) {
+              setState(() {
+                _currentFocusIndex = index;
+              });
+            }
+          },
+          child: Row(
+            children: [
+              Checkbox(
+                value: element.isChecked,
                 onChanged: (value) {
                   setState(() {
-                    element.content = value;
+                    element.isChecked = value ?? false;
                     _hasChanges = true;
                   });
                 },
-                decoration: const InputDecoration(
-                  border: InputBorder.none,
-                  hintText: 'Checklist item',
+              ),
+              Expanded(
+                child: TextField(
+                  controller: element.textController,
+                  focusNode: element.focusNode, // Thêm focusNode vào đây
+                  onChanged: (value) {
+                    setState(() {
+                      element.content = value;
+                      _hasChanges = true;
+                    });
+                  },
+                  decoration: const InputDecoration(
+                    border: InputBorder.none,
+                    hintText: 'Checklist item',
+                  ),
                 ),
               ),
-            ),
-            IconButton(
-              icon: const Icon(Icons.close),
-              onPressed: () {
-                setState(() {
-                  _noteElements.removeAt(index);
-                  _hasChanges = true;
-                });
-              },
-            ),
-          ],
+              IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () {
+                  setState(() {
+                    _noteElements.removeAt(index);
+                    _hasChanges = true;
+                  });
+                },
+              ),
+            ],
+          ),
         );
       case NoteElementType.image:
         return Stack(
@@ -357,10 +423,7 @@ class _NoteEditorState extends State<NoteEditor> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
-          IconButton(
-            icon: const Icon(Icons.text_fields),
-            onPressed: () => _addElement(NoteElementType.text),
-          ),
+          // Bỏ nút text đi
           IconButton(
             icon: const Icon(Icons.checklist),
             onPressed: () => _addElement(NoteElementType.checklist),
@@ -400,20 +463,45 @@ class _NoteEditorState extends State<NoteEditor> {
   }
 
   void _addElement(NoteElementType type) async {
+    int insertIndex = _currentFocusIndex;
+
+    if (insertIndex < 0 || insertIndex >= _noteElements.length) {
+      insertIndex = _noteElements.length;
+    } else {
+      insertIndex += 1;
+    }
+
     if (type == NoteElementType.image) {
       final file = await _pickImage();
       if (file != null) {
         setState(() {
-          _noteElements.add(NoteElement(type: type, image: file));
+          // Thêm image element
+          _noteElements.insert(insertIndex, NoteElement(type: type, image: file));
+          // Thêm text element mới phía dưới
+          _noteElements.insert(insertIndex + 1, NoteElement(type: NoteElementType.text));
           _hasChanges = true;
         });
       }
-    } else {
+    } else if (type == NoteElementType.checklist) {
       setState(() {
-        _noteElements.add(NoteElement(type: type));
+        // Thêm checklist element
+        NoteElement newElement = NoteElement(type: type);
+        _noteElements.insert(insertIndex, newElement);
+        // Thêm text element mới phía dưới
+        _noteElements.insert(insertIndex + 1, NoteElement(type: NoteElementType.text));
         _hasChanges = true;
+
+        // Focus vào checklist mới
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          newElement.focusNode?.requestFocus();
+        });
       });
     }
+  }
+  void _handleTapOutside() {
+    setState(() {
+      _currentFocusIndex = -1; // Reset vị trí focus
+    });
   }
 
   Future<File?> _pickImage() async {
@@ -664,6 +752,7 @@ class _NoteEditorState extends State<NoteEditor> {
         'images': imagePaths.join(','),
         'reminder': _reminder?.toIso8601String(),
         'color': _color.value,
+        'is_favorite': _isFavorite ? 1 : 0,
         'tags': _tagsController.text.trim(),
         'checklist': json.encode(_checklistItems
             .where((item) => item.text.isNotEmpty)
@@ -778,6 +867,11 @@ class _NoteEditorState extends State<NoteEditor> {
         // Load elements
         if (widget.note!['elements'] != null) {
           _loadElements(widget.note!['elements'] as String);
+        }
+
+        // Đảm bảo luôn có một text element nếu note trống
+        if (_noteElements.isEmpty) {
+          _noteElements.add(NoteElement(type: NoteElementType.text));
         }
 
         // Load checklist items

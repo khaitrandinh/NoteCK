@@ -38,7 +38,7 @@ class _TagsPageState extends State<TagsPage> {
         elevation: 0,
       ),
       body: _availableTags.isEmpty
-          ? const Center(child: CircularProgressIndicator())
+          ? const Center(child: Text('No tags available'))
           : ListView.builder(
         itemCount: _availableTags.length,
         itemBuilder: (context, index) {
@@ -65,6 +65,7 @@ class _TagsPageState extends State<TagsPage> {
       ),
     );
   }
+
 
   Future<Database> _initDatabase() async {
     Directory documentsDirectory = await getApplicationDocumentsDirectory();
@@ -126,7 +127,7 @@ class NotesListPage extends StatelessWidget {
   Widget build(BuildContext context) {
 
     return Scaffold(
-      appBar: AppBar(title: Text('Notes for Tag: $tag')),
+      appBar: AppBar(title: Text(' Tag: $tag')),
       body: notes.isEmpty
           ? const Center(child: Text('No notes found for this tag'))
           : ListView.builder(

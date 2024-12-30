@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 import 'dart:io';
 import 'package:path/path.dart' as path;
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
 import '../note_editor/note_editor_page.dart';
 import 'package:test_note/search_page/search_page.dart';
 import 'package:test_note/tags_page/tags_page.dart';
@@ -28,6 +28,8 @@ class _NotesHomePageState extends State<NotesHomePage> {
   bool _isLoading = true;
   int _selectedIndex = 0;
   late Future<List<Map<String, dynamic>>> _notesFuture;
+  List<Map<String, dynamic>> _favoriteNotes = [];
+  List<Map<String, dynamic>> _regularNotes = [];
 
   @override
   void initState() {
@@ -46,11 +48,14 @@ class _NotesHomePageState extends State<NotesHomePage> {
     if (mounted) {
       setState(() {
         _notes = notes;
+        _favoriteNotes = notes.where((note) => note['is_favorite'] == 1).toList();
+        _regularNotes = notes.where((note) => note['is_favorite'] != 1).toList();
         _selectedNotes = List.filled(notes.length, false);
       });
     }
     return notes;
   }
+
 
   @override
   Widget build(BuildContext context) {
@@ -149,26 +154,111 @@ class _NotesHomePageState extends State<NotesHomePage> {
   }
 
   Widget _buildGridView() {
-    return GridView.builder(
+    return ListView(
       padding: const EdgeInsets.all(8),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 2,
-        crossAxisSpacing: 8,
-        mainAxisSpacing: 8,
-        childAspectRatio: 0.85,
-      ),
-      itemCount: _notes.length,
-      itemBuilder: (context, index) => _buildNoteCard(_notes[index], index),
+      children: [
+        if (_favoriteNotes.isNotEmpty) ...[
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+            child: Text(
+              'Favorites',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey,
+              ),
+            ),
+          ),
+          GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              crossAxisSpacing: 8,
+              mainAxisSpacing: 8,
+              childAspectRatio: 0.85,
+            ),
+            itemCount: _favoriteNotes.length,
+            itemBuilder: (context, index) {
+              final globalIndex = _notes.indexWhere((note) => note['id'] == _favoriteNotes[index]['id']);
+              return _buildNoteCard(_favoriteNotes[index], globalIndex);
+            },
+          ),
+        ],
+        if (_regularNotes.isNotEmpty) ...[
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+            child: Text(
+              'Notes',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey,
+              ),
+            ),
+          ),
+          GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 2,
+              crossAxisSpacing: 8,
+              mainAxisSpacing: 8,
+              childAspectRatio: 0.85,
+            ),
+            itemCount: _regularNotes.length,
+            itemBuilder: (context, index) {
+              final globalIndex = _notes.indexWhere((note) => note['id'] == _regularNotes[index]['id']);
+              return _buildNoteCard(_regularNotes[index], globalIndex);
+            },
+          ),
+        ],
+      ],
     );
   }
 
   Widget _buildListView() {
-    return ListView.builder(
+    return ListView(
       padding: const EdgeInsets.all(8),
-      itemCount: _notes.length,
-      itemBuilder: (context, index) => _buildNoteCard(_notes[index], index),
+      children: [
+        if (_favoriteNotes.isNotEmpty) ...[
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+            child: Text(
+              'Favorites',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey,
+              ),
+            ),
+          ),
+          ..._favoriteNotes.map((note) {
+            final globalIndex = _notes.indexWhere((n) => n['id'] == note['id']);
+            return _buildNoteCard(note, globalIndex);
+          }),
+        ],
+        if (_regularNotes.isNotEmpty) ...[
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+            child: Text(
+              'Notes',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey,
+              ),
+            ),
+          ),
+          ..._regularNotes.map((note) {
+            final globalIndex = _notes.indexWhere((n) => n['id'] == note['id']);
+            return _buildNoteCard(note, globalIndex);
+          }),
+        ],
+      ],
     );
   }
+
 
   Widget _buildNoteCard(Map<String, dynamic> note, int index) {
     // Process images
@@ -257,7 +347,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
                         mainAxisSize: MainAxisSize.min,
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          _buildTitleRow(note['title'], index),
+                          _buildTitleRow(note['title'], index, note),
                           const SizedBox(height: 4),
                           _buildDescription(note['description']),
                           if (checklistItems.isNotEmpty) ...[
@@ -331,7 +421,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
     );
   }
 
-  Widget _buildTitleRow(String? title, int index) {
+  Widget _buildTitleRow(String? title, int index, Map<String, dynamic> note) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -351,16 +441,21 @@ class _NotesHomePageState extends State<NotesHomePage> {
           SizedBox(
             height: 24,
             width: 24,
-            child: Checkbox(
-              value: _selectedNotes[index],
-              onChanged: (bool? value) {
-                setState(() {
-                  _selectedNotes[index] = value ?? false;
-                  if (!_selectedNotes.contains(true)) {
-                    _isSelecting = false;
-                  }
-                });
-              },
+            child: Transform.scale(
+              scale: 0.9,
+              child: Checkbox(
+                activeColor: Colors.blueGrey[300],
+                value: _selectedNotes[index],
+                onChanged: (bool? value) {
+                  setState(() {
+                    _selectedNotes[index] = value ?? false;
+                    if (!_selectedNotes.contains(true)) {
+                      _isSelecting = false;
+                    }
+                  });
+                },
+                shape: const CircleBorder(),
+              ),
             ),
           ),
       ],
@@ -501,28 +596,30 @@ class _NotesHomePageState extends State<NotesHomePage> {
     }
   }
 
+
   Future<Database> _initDatabase() async {
     Directory documentsDirectory = await getApplicationDocumentsDirectory();
     String dbPath = path.join(documentsDirectory.path, 'noteCK.db');
     return openDatabase(
       dbPath,
-      version: 1,
+      version: 2, // Increment version number
       onCreate: (db, version) async {
         await db.execute('''
-          CREATE TABLE notes(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            description TEXT,
-            elements TEXT,
-            images TEXT,
-            reminder TEXT,
-            color INTEGER,
-            tags TEXT,
-            checklist TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-          )
-        ''');
+        CREATE TABLE notes(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT,
+          description TEXT,
+          elements TEXT,
+          images TEXT,
+          reminder TEXT,
+          color INTEGER,
+          is_favorite INTEGER DEFAULT 0,
+          tags TEXT,
+          checklist TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      ''');
       },
     );
   }
@@ -662,11 +759,6 @@ class _NotesHomePageState extends State<NotesHomePage> {
 
 
 
-  // Future<bool> checkInternetConnection() async {
-  //   var connectivityResult = await (Connectivity().checkConnectivity());
-  //   return connectivityResult != ConnectivityResult.none;
-  // }
-
   // Firebase sync functionality
   Future<void> manualSync() async {
     // Kiểm tra kết nối internet
@@ -697,14 +789,19 @@ class _NotesHomePageState extends State<NotesHomePage> {
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: const Column(
+              child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 20),
+                  const CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Colors.blueGrey)),
+                  const SizedBox(height: 20),
                   Text(
                     'Syncing...',
-                    style: TextStyle(fontSize: 16),
+                    style: GoogleFonts.roboto(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600, // Semi-bold
+                      color: Colors.blueGrey,
+                      letterSpacing: 1.5,
+                    ),
                   ),
                 ],
               ),
@@ -716,7 +813,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
 
     try {
       // Thử kết nối Firebase
-      bool isFirebaseAvailable = await _checkFirebaseConnection();
+      bool isFirebaseAvailable = await SyncUtils.checkFirebaseConnection();
       if (!isFirebaseAvailable) {
         throw Exception('Cannot connect to Firebase. Please try again later.');
       }
@@ -755,147 +852,7 @@ class _NotesHomePageState extends State<NotesHomePage> {
     }
   }
 
-  Future<bool> _checkFirebaseConnection() async {
-    try {
-      // Thử thực hiện một truy vấn đơn giản để kiểm tra kết nối
-      final firestore = FirebaseFirestore.instance;
-      await firestore.collection('notes').limit(1).get();
-      return true;
-    } catch (e) {
-      print('Firebase connection check failed: $e');
-      return false;
-    }
-  }
 
-  // Future<List<Map<String, dynamic>>> fetchNotesFromFirebase() async {
-  //   final firestore = FirebaseFirestore.instance;
-  //   final snapshot = await firestore.collection('notes').get();
-  //
-  //   return snapshot.docs.map((doc) {
-  //     final data = Map<String, dynamic>.from(doc.data());
-  //
-  //     // Chuyển đổi các trường số thành string
-  //     if (data['id'] != null) data['id'] = data['id'].toString();
-  //     if (data['color'] != null) data['color'] = data['color'].toString();
-  //
-  //     return data;
-  //   }).toList();
-  // }
-  //
-  // Future<void> pushNoteToFirebase(Map<String, dynamic> note) async {
-  //   final firestore = FirebaseFirestore.instance;
-  //
-  //   try {
-  //     // Create a copy of the note to modify
-  //     final noteToSync = Map<String, dynamic>.from(note);
-  //
-  //     // Convert id to string if it exists
-  //     if (noteToSync['id'] != null) {
-  //       noteToSync['id'] = noteToSync['id'].toString();
-  //     }
-  //
-  //     // Convert other numeric fields to appropriate types if needed
-  //     if (noteToSync['color'] != null) {
-  //       noteToSync['color'] = noteToSync['color'].toString();
-  //     }
-  //
-  //     if (noteToSync['id'] != null) {
-  //       await firestore.collection('notes').doc(noteToSync['id']).set(noteToSync);
-  //     } else {
-  //       await firestore.collection('notes').add(noteToSync);
-  //     }
-  //   } catch (e) {
-  //     print('Error pushing note to Firebase: $e');
-  //     throw e; // Re-throw to handle in UI
-  //   }
-  // }
-
-  // Future<void> syncWithFirebase(Future<Database> database) async {
-  //   if (!await checkInternetConnection()) {
-  //     throw Exception('No internet connection');
-  //   }
-  //
-  //   final db = await database;
-  //
-  //   try {
-  //     final notesFromSQLite = await db.query('notes');
-  //     final notesFromFirebase = await fetchNotesFromFirebase();
-  //
-  //     // Sync Firebase -> SQLite
-  //     for (final firebaseNote in notesFromFirebase) {
-  //       try {
-  //         final sqliteNote = notesFromSQLite.firstWhere(
-  //               (note) => note['id'].toString() == firebaseNote['id'].toString(),
-  //           orElse: () => {},
-  //         );
-  //
-  //         // Convert dates to String and handle null cases
-  //         final firebaseUpdatedAt = firebaseNote['updated_at']?.toString() ?? DateTime.now().toIso8601String();
-  //         final sqliteUpdatedAt = sqliteNote['updated_at']?.toString() ?? '';
-  //
-  //         // Nếu note không tồn tại hoặc Firebase version mới hơn
-  //         if (sqliteNote.isEmpty ||
-  //             DateTime.parse(firebaseUpdatedAt).isAfter(
-  //                 DateTime.parse(sqliteUpdatedAt)
-  //             )) {
-  //           int? color;
-  //           if (firebaseNote['color'] != null) {
-  //             color = int.tryParse(firebaseNote['color'].toString());
-  //           }
-  //
-  //           await db.insert(
-  //             'notes',
-  //             {
-  //               'id': int.parse(firebaseNote['id']),
-  //               'title': firebaseNote['title']?.toString() ?? '',
-  //               'description': firebaseNote['description']?.toString() ?? '',
-  //               'elements': firebaseNote['elements']?.toString() ?? '',
-  //               'images': firebaseNote['images']?.toString() ?? '',
-  //               'reminder': firebaseNote['reminder']?.toString() ?? '',
-  //               'color': color,
-  //               'checklist': firebaseNote['checklist']?.toString() ?? '',
-  //               'tags': firebaseNote['tags']?.toString() ?? '',
-  //               'created_at': firebaseNote['created_at']?.toString() ?? DateTime.now().toIso8601String(),
-  //               'updated_at': firebaseUpdatedAt,
-  //             },
-  //             conflictAlgorithm: ConflictAlgorithm.replace,
-  //           );
-  //         }
-  //       } catch (e) {
-  //         print('Error syncing Firebase note to SQLite: $e');
-  //         continue;
-  //       }
-  //     }
-  //
-  //     // Sync SQLite -> Firebase
-  //     for (final sqliteNote in notesFromSQLite) {
-  //       try {
-  //         final firebaseNote = notesFromFirebase.firstWhere(
-  //               (note) => note['id'].toString() == sqliteNote['id'].toString(),
-  //           orElse: () => {},
-  //         );
-  //
-  //         // Convert dates to String and handle null cases
-  //         final sqliteUpdatedAt = sqliteNote['updated_at']?.toString() ?? DateTime.now().toIso8601String();
-  //         final firebaseUpdatedAt = firebaseNote['updated_at']?.toString() ?? '';
-  //
-  //         // Nếu note không tồn tại trên Firebase hoặc SQLite version mới hơn
-  //         if (firebaseNote.isEmpty ||
-  //             DateTime.parse(sqliteUpdatedAt).isAfter(
-  //                 DateTime.parse(firebaseUpdatedAt)
-  //             )) {
-  //           await pushNoteToFirebase(sqliteNote);
-  //         }
-  //       } catch (e) {
-  //         print('Error syncing SQLite note to Firebase: $e');
-  //         continue;
-  //       }
-  //     }
-  //   } catch (e) {
-  //     print('General sync error: $e');
-  //     throw Exception('Sync failed: ${e.toString()}');
-  //   }
-  // }
 }
 
 // Helper class for checklist items
